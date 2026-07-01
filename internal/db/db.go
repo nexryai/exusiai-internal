@@ -1,8 +1,13 @@
 package db
 
 import (
+	"context"
 	"errors"
 	"time"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 const (
@@ -26,6 +31,7 @@ var (
 	ErrMetadataRequired  = errors.New("youtube metadata is required")
 	ErrStorageURLMissing = errors.New("storage url is required for completed video")
 	ErrErrorMissing      = errors.New("error message is required for failed video")
+	ErrVideoNotFound     = errors.New("video archive not found")
 )
 
 // UserVideoArchiveDocument is stored in MongoDB with the application user ID as
@@ -155,4 +161,177 @@ func (s VideoStatus) Valid() bool {
 	default:
 		return false
 	}
+}
+
+type Repository struct {
+	collection *mongo.Collection
+}
+
+func NewRepository(database *mongo.Database) *Repository {
+	return &Repository{
+		collection: database.Collection(ArchiveCollectionName),
+	}
+}
+
+func Connect(ctx context.Context, uri, databaseName string) (*mongo.Client, *mongo.Database, error) {
+	client, err := mongo.Connect(options.Client().ApplyURI(uri))
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := client.Ping(ctx, nil); err != nil {
+		_ = client.Disconnect(ctx)
+		return nil, nil, err
+	}
+	return client, client.Database(databaseName), nil
+}
+
+func (r *Repository) EnsureIndexes(ctx context.Context) error {
+	models := make([]mongo.IndexModel, 0, len(RecommendedArchiveIndexes()))
+	for _, recommended := range RecommendedArchiveIndexes() {
+		keys := bson.D{}
+		for _, key := range recommended.Keys {
+			keys = append(keys, bson.E{Key: key.Field, Value: key.Direction})
+		}
+		models = append(models, mongo.IndexModel{
+			Keys:    keys,
+			Options: options.Index().SetName(recommended.Name).SetUnique(recommended.Unique),
+		})
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	_, err := r.collection.Indexes().CreateMany(ctx, models)
+	return err
+}
+
+func (r *Repository) AddVideo(ctx context.Context, userID string, video VideoArchive) error {
+	if userID == "" {
+		return ErrUserIDRequired
+	}
+	if err := video.Validate(); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	video.QueuedAt = defaultTime(video.QueuedAt, now)
+	video.UpdatedAt = defaultTime(video.UpdatedAt, now)
+
+	_, err := r.collection.UpdateOne(
+		ctx,
+		bson.M{"_id": userID},
+		bson.M{
+			"$setOnInsert": bson.M{
+				"_id":       userID,
+				"createdAt": now,
+			},
+			"$set": bson.M{
+				"updatedAt": now,
+			},
+			"$push": bson.M{
+				"videos": video,
+			},
+		},
+		options.UpdateOne().SetUpsert(true),
+	)
+	return err
+}
+
+func (r *Repository) GetVideo(ctx context.Context, videoID string) (VideoArchive, error) {
+	if videoID == "" {
+		return VideoArchive{}, ErrVideoIDRequired
+	}
+
+	var result struct {
+		Videos []VideoArchive `bson:"videos"`
+	}
+	err := r.collection.FindOne(
+		ctx,
+		bson.M{"videos._id": videoID},
+		options.FindOne().SetProjection(bson.M{"videos.$": 1}),
+	).Decode(&result)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return VideoArchive{}, ErrVideoNotFound
+	}
+	if err != nil {
+		return VideoArchive{}, err
+	}
+	if len(result.Videos) == 0 {
+		return VideoArchive{}, ErrVideoNotFound
+	}
+	return result.Videos[0], nil
+}
+
+func (r *Repository) MarkStarted(ctx context.Context, videoID string, startedAt time.Time) error {
+	if videoID == "" {
+		return ErrVideoIDRequired
+	}
+	startedAt = startedAt.UTC()
+	return r.updateVideoFields(ctx, videoID, bson.M{
+		"videos.$.startedAt": startedAt,
+		"videos.$.updatedAt": startedAt,
+		"updatedAt":          startedAt,
+	})
+}
+
+func (r *Repository) MarkCompleted(ctx context.Context, videoID string, storage StorageObject, finishedAt time.Time) error {
+	if videoID == "" {
+		return ErrVideoIDRequired
+	}
+	if storage.URL == "" {
+		return ErrStorageURLMissing
+	}
+	finishedAt = finishedAt.UTC()
+	if storage.UploadedAt.IsZero() {
+		storage.UploadedAt = finishedAt
+	}
+	return r.updateVideoFields(ctx, videoID, bson.M{
+		"videos.$.status":     VideoStatusCompleted,
+		"videos.$.storage":    storage,
+		"videos.$.finishedAt": finishedAt,
+		"videos.$.updatedAt":  finishedAt,
+		"updatedAt":           finishedAt,
+	})
+}
+
+func (r *Repository) MarkFailed(ctx context.Context, videoID, stage, message string, failedAt time.Time) error {
+	if videoID == "" {
+		return ErrVideoIDRequired
+	}
+	if message == "" {
+		return ErrErrorMissing
+	}
+	failedAt = failedAt.UTC()
+	return r.updateVideoFields(ctx, videoID, bson.M{
+		"videos.$.status": VideoStatusFailed,
+		"videos.$.failure": FailureDetail{
+			Message:  message,
+			Stage:    stage,
+			FailedAt: failedAt,
+		},
+		"videos.$.finishedAt": failedAt,
+		"videos.$.updatedAt":  failedAt,
+		"updatedAt":           failedAt,
+	})
+}
+
+func (r *Repository) updateVideoFields(ctx context.Context, videoID string, fields bson.M) error {
+	result, err := r.collection.UpdateOne(
+		ctx,
+		bson.M{"videos._id": videoID},
+		bson.M{"$set": fields},
+	)
+	if err != nil {
+		return err
+	}
+	if result.MatchedCount == 0 {
+		return ErrVideoNotFound
+	}
+	return nil
+}
+
+func defaultTime(value, fallback time.Time) time.Time {
+	if value.IsZero() {
+		return fallback
+	}
+	return value.UTC()
 }
