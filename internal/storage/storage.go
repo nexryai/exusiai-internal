@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ var (
 	ErrAccessKeyIDRequired     = errors.New("aws access key id is required")
 	ErrBucketRequired          = errors.New("aws s3 bucket is required")
 	ErrEndpointRequired        = errors.New("aws s3 endpoint is required")
+	ErrKeyRequired             = errors.New("object key is required")
 	ErrFilePathRequired        = errors.New("file path is required")
 	ErrRegionRequired          = errors.New("aws s3 region is required")
 	ErrSecretAccessKeyRequired = errors.New("aws secret access key is required")
@@ -27,7 +29,8 @@ var (
 )
 
 type Uploader interface {
-	Upload(ctx context.Context, videoID, filePath string) (db.StorageObject, error)
+	UploadFile(ctx context.Context, key, filePath string) (db.StorageObject, error)
+	UploadDirectory(ctx context.Context, prefix, dirPath string) ([]db.StorageObject, error)
 }
 
 type S3Config struct {
@@ -96,9 +99,9 @@ func (c S3Config) Validate() error {
 	return nil
 }
 
-func (u *S3Uploader) Upload(ctx context.Context, videoID, filePath string) (db.StorageObject, error) {
-	if videoID == "" {
-		return db.StorageObject{}, ErrVideoIDRequired
+func (u *S3Uploader) UploadFile(ctx context.Context, key, filePath string) (db.StorageObject, error) {
+	if key == "" {
+		return db.StorageObject{}, ErrKeyRequired
 	}
 	if filePath == "" {
 		return db.StorageObject{}, ErrFilePathRequired
@@ -115,7 +118,6 @@ func (u *S3Uploader) Upload(ctx context.Context, videoID, filePath string) (db.S
 		return db.StorageObject{}, err
 	}
 
-	key := videoID + filepath.Ext(filePath)
 	contentType := contentTypeFromExt(filepath.Ext(filePath))
 	_, err = u.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(u.bucket),
@@ -138,6 +140,40 @@ func (u *S3Uploader) Upload(ctx context.Context, videoID, filePath string) (db.S
 	}, nil
 }
 
+func (u *S3Uploader) UploadDirectory(ctx context.Context, prefix, dirPath string) ([]db.StorageObject, error) {
+	if prefix == "" {
+		return nil, ErrKeyRequired
+	}
+	if dirPath == "" {
+		return nil, ErrFilePathRequired
+	}
+
+	var uploaded []db.StorageObject
+	err := filepath.WalkDir(dirPath, func(filePath string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		relativePath, err := filepath.Rel(dirPath, filePath)
+		if err != nil {
+			return err
+		}
+		objectKey := path.Join(prefix, filepath.ToSlash(relativePath))
+		object, err := u.UploadFile(ctx, objectKey, filePath)
+		if err != nil {
+			return err
+		}
+		uploaded = append(uploaded, object)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return uploaded, nil
+}
+
 func (u *S3Uploader) objectURL(key string) string {
 	if u.publicBaseURL != "" {
 		return joinURL(u.publicBaseURL, key)
@@ -157,9 +193,9 @@ func NewLocalUploader(baseDir, baseURL string) *LocalUploader {
 	}
 }
 
-func (u *LocalUploader) Upload(ctx context.Context, videoID, filePath string) (db.StorageObject, error) {
-	if videoID == "" {
-		return db.StorageObject{}, ErrVideoIDRequired
+func (u *LocalUploader) UploadFile(ctx context.Context, key, filePath string) (db.StorageObject, error) {
+	if key == "" {
+		return db.StorageObject{}, ErrKeyRequired
 	}
 	if filePath == "" {
 		return db.StorageObject{}, ErrFilePathRequired
@@ -180,8 +216,10 @@ func (u *LocalUploader) Upload(ctx context.Context, videoID, filePath string) (d
 		return db.StorageObject{}, err
 	}
 
-	key := videoID + filepath.Ext(filePath)
-	targetPath := filepath.Join(u.baseDir, key)
+	targetPath := filepath.Join(u.baseDir, filepath.FromSlash(key))
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return db.StorageObject{}, err
+	}
 	target, err := os.Create(targetPath)
 	if err != nil {
 		return db.StorageObject{}, err
@@ -196,11 +234,46 @@ func (u *LocalUploader) Upload(ctx context.Context, videoID, filePath string) (d
 	}
 
 	return db.StorageObject{
-		URL:        joinURL(u.baseURL, key),
-		Key:        key,
-		SizeBytes:  info.Size(),
-		UploadedAt: time.Now().UTC(),
+		URL:         joinURL(u.baseURL, key),
+		Key:         key,
+		ContentType: contentTypeFromExt(filepath.Ext(filePath)),
+		SizeBytes:   info.Size(),
+		UploadedAt:  time.Now().UTC(),
 	}, nil
+}
+
+func (u *LocalUploader) UploadDirectory(ctx context.Context, prefix, dirPath string) ([]db.StorageObject, error) {
+	if prefix == "" {
+		return nil, ErrKeyRequired
+	}
+	if dirPath == "" {
+		return nil, ErrFilePathRequired
+	}
+
+	var uploaded []db.StorageObject
+	err := filepath.WalkDir(dirPath, func(filePath string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		relativePath, err := filepath.Rel(dirPath, filePath)
+		if err != nil {
+			return err
+		}
+		objectKey := path.Join(prefix, filepath.ToSlash(relativePath))
+		object, err := u.UploadFile(ctx, objectKey, filePath)
+		if err != nil {
+			return err
+		}
+		uploaded = append(uploaded, object)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return uploaded, nil
 }
 
 func joinURL(baseURL, key string) string {
@@ -215,6 +288,12 @@ func joinURL(baseURL, key string) string {
 
 func contentTypeFromExt(ext string) string {
 	switch strings.ToLower(ext) {
+	case ".avif":
+		return "image/avif"
+	case ".mpd":
+		return "application/dash+xml"
+	case ".m4s":
+		return "video/iso.segment"
 	case ".mp4":
 		return "video/mp4"
 	case ".webm":

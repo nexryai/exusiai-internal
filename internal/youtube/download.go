@@ -95,7 +95,6 @@ func (d *Downloader) buildCommand(ctx context.Context, targetDir, sourceURL, for
 		ctx,
 		"yt-dlp",
 		"-f", format,
-		"--merge-output-format", "mkv",
 		"-o", outputTemplate,
 		sourceURL,
 	)

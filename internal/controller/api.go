@@ -55,6 +55,7 @@ type StatusResponse struct {
 	ID        string           `json:"id"`
 	Status    db.VideoStatus   `json:"status"`
 	Storage   db.StorageObject `json:"storage,omitempty"`
+	Thumbnail db.StorageObject `json:"thumbnail,omitempty"`
 	Failure   db.FailureDetail `json:"failure,omitempty"`
 	UpdatedAt string           `json:"updatedAt"`
 }
@@ -112,6 +113,7 @@ func (c *QueueController) HandleQueueStatus(w http.ResponseWriter, r *http.Reque
 		ID:        video.ID,
 		Status:    video.Status,
 		Storage:   video.Storage,
+		Thumbnail: video.Thumbnail,
 		Failure:   video.Failure,
 		UpdatedAt: video.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
 	})

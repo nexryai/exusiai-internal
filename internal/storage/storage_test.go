@@ -20,27 +20,57 @@ func TestLocalUploaderUpload(t *testing.T) {
 	targetDir := t.TempDir()
 	uploader := NewLocalUploader(targetDir, "https://cdn.example.test/videos")
 
-	storageObject, err := uploader.Upload(context.Background(), "video-1", sourcePath)
+	storageObject, err := uploader.UploadFile(context.Background(), "video-1/source.mkv", sourcePath)
 	if err != nil {
-		t.Fatalf("Upload returned error: %v", err)
+		t.Fatalf("UploadFile returned error: %v", err)
 	}
 
-	if storageObject.URL != "https://cdn.example.test/videos/video-1.mkv" {
+	if storageObject.URL != "https://cdn.example.test/videos/video-1/source.mkv" {
 		t.Fatalf("URL = %q", storageObject.URL)
 	}
-	if storageObject.Key != "video-1.mkv" {
+	if storageObject.Key != "video-1/source.mkv" {
 		t.Fatalf("Key = %q", storageObject.Key)
 	}
 	if storageObject.SizeBytes != 5 {
 		t.Fatalf("SizeBytes = %d", storageObject.SizeBytes)
 	}
 
-	copied, err := os.ReadFile(filepath.Join(targetDir, "video-1.mkv"))
+	copied, err := os.ReadFile(filepath.Join(targetDir, "video-1", "source.mkv"))
 	if err != nil {
 		t.Fatalf("failed to read copied file: %v", err)
 	}
 	if string(copied) != "video" {
 		t.Fatalf("copied file = %q", copied)
+	}
+}
+
+func TestLocalUploaderUploadDirectory(t *testing.T) {
+	t.Parallel()
+
+	sourceDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sourceDir, "manifest.mpd"), []byte("mpd"), 0o644); err != nil {
+		t.Fatalf("failed to write manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "chunk_0_1.webm"), []byte("chunk"), 0o644); err != nil {
+		t.Fatalf("failed to write chunk: %v", err)
+	}
+
+	targetDir := t.TempDir()
+	uploader := NewLocalUploader(targetDir, "https://cdn.example.test/videos")
+
+	uploaded, err := uploader.UploadDirectory(context.Background(), "video-1", sourceDir)
+	if err != nil {
+		t.Fatalf("UploadDirectory returned error: %v", err)
+	}
+	if len(uploaded) != 2 {
+		t.Fatalf("uploaded len = %d", len(uploaded))
+	}
+
+	if _, err := os.Stat(filepath.Join(targetDir, "video-1", "manifest.mpd")); err != nil {
+		t.Fatalf("manifest was not uploaded: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "video-1", "chunk_0_1.webm")); err != nil {
+		t.Fatalf("chunk was not uploaded: %v", err)
 	}
 }
 

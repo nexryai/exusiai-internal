@@ -12,6 +12,7 @@ import (
 
 	"github.com/nexryai/exusiai-internal/internal/controller"
 	"github.com/nexryai/exusiai-internal/internal/db"
+	"github.com/nexryai/exusiai-internal/internal/media"
 	"github.com/nexryai/exusiai-internal/internal/queue"
 	"github.com/nexryai/exusiai-internal/internal/server"
 	"github.com/nexryai/exusiai-internal/internal/storage"
@@ -55,6 +56,7 @@ func run() error {
 
 	youtubeClient := youtube.NewAPIClient(cfg.YouTubeAPIKey, &http.Client{Timeout: 10 * time.Second})
 	downloader := youtube.NewDownloader(cfg.DownloadWorkDir)
+	processor := media.NewProcessor(cfg.FFmpegPath, cfg.DownloadWorkDir, &http.Client{Timeout: 30 * time.Second})
 	uploader, err := storage.NewS3Uploader(startupCtx, storage.S3Config{
 		AccessKeyID:     cfg.AWSAccessKeyID,
 		SecretAccessKey: cfg.AWSSecretAccessKey,
@@ -66,7 +68,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	queueService := queue.NewService(rootCtx, repo, downloader, uploader)
+	queueService := queue.NewService(rootCtx, repo, downloader, processor, uploader)
 	queueController := controller.NewQueueController(queueService, youtubeClient)
 
 	srv, err := server.New(cfg.Port, queueController, "")
@@ -107,6 +109,7 @@ type config struct {
 	MongoDatabase       string
 	YouTubeAPIKey       string
 	DownloadWorkDir     string
+	FFmpegPath          string
 	PublicObjectBaseURL string
 	AWSAccessKeyID      string
 	AWSSecretAccessKey  string
@@ -124,6 +127,7 @@ func loadConfig() (config, error) {
 		MongoDatabase:       envOrDefault("MONGODB_DATABASE", "exusiai_internal"),
 		YouTubeAPIKey:       os.Getenv("YOUTUBE_API_KEY"),
 		DownloadWorkDir:     envOrDefault("DOWNLOAD_WORK_DIR", os.TempDir()),
+		FFmpegPath:          envOrDefault("FFMPEG_PATH", "ffmpeg"),
 		PublicObjectBaseURL: os.Getenv("PUBLIC_OBJECT_BASE_URL"),
 		AWSAccessKeyID:      os.Getenv("AWS_ACCESS_KEY_ID"),
 		AWSSecretAccessKey:  os.Getenv("AWS_SECRET_ACCESS_KEY"),

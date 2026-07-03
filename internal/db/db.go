@@ -50,6 +50,7 @@ type VideoArchive struct {
 	Status     VideoStatus     `bson:"status" json:"status"`
 	YouTube    YouTubeMetadata `bson:"youtube" json:"youtube"`
 	Storage    StorageObject   `bson:"storage,omitempty" json:"storage,omitempty"`
+	Thumbnail  StorageObject   `bson:"thumbnail,omitempty" json:"thumbnail,omitempty"`
 	Failure    FailureDetail   `bson:"failure,omitempty" json:"failure,omitempty"`
 	QueuedAt   time.Time       `bson:"queuedAt" json:"queuedAt"`
 	StartedAt  *time.Time      `bson:"startedAt,omitempty" json:"startedAt,omitempty"`
@@ -273,7 +274,7 @@ func (r *Repository) MarkStarted(ctx context.Context, videoID string, startedAt 
 	})
 }
 
-func (r *Repository) MarkCompleted(ctx context.Context, videoID string, storage StorageObject, finishedAt time.Time) error {
+func (r *Repository) MarkCompleted(ctx context.Context, videoID string, storage, thumbnail StorageObject, finishedAt time.Time) error {
 	if videoID == "" {
 		return ErrVideoIDRequired
 	}
@@ -284,9 +285,13 @@ func (r *Repository) MarkCompleted(ctx context.Context, videoID string, storage 
 	if storage.UploadedAt.IsZero() {
 		storage.UploadedAt = finishedAt
 	}
+	if !thumbnail.UploadedAt.IsZero() {
+		thumbnail.UploadedAt = thumbnail.UploadedAt.UTC()
+	}
 	return r.updateVideoFields(ctx, videoID, bson.M{
 		"videos.$.status":     VideoStatusCompleted,
 		"videos.$.storage":    storage,
+		"videos.$.thumbnail":  thumbnail,
 		"videos.$.finishedAt": finishedAt,
 		"videos.$.updatedAt":  finishedAt,
 		"updatedAt":           finishedAt,
